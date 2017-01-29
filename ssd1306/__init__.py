@@ -315,10 +315,6 @@ class SSD1306(object):
         if result:
             raise IOError(-result)
 
-    def _read(self, control, length):
-        # TODO: figure reads out
-        raise NotImplementedError
-
     def _writeCommand(self, *command):
         buf = bytearray(len(command) * 2)
         for index, payload_byte in enumerate(command):
@@ -326,9 +322,6 @@ class SSD1306(object):
             buf[index] = CONTROL_TYPE_COMMAND
             buf[index + 1] = payload_byte
         self._bus.write(buf)
-
-    def _readCommand(self, length):
-        return self._read(CONTROL_TYPE_COMMAND, length)
 
     def blitRaw(self, buf):
         # TODO: use AIO to not keep CPU waiting for transfer completion.
@@ -343,11 +336,9 @@ class SSD1306(object):
         buf[1:] = data
         self._bus.write(buf)
 
-    def _readData(self, length):
-        return self._read(CONTROL_TYPE_DATA, length)
-
     def getStatus(self):
-        return [ord(x) for x in self._read(1)]
+        status, = self._bus.read(1)
+        return ord(status)
 
     def setContrast(self, contrast):
         """
