@@ -137,32 +137,51 @@ class Framebuffer(object):
             self.putPixel(ax, ay, color)
             return
         inc_x = 1 if delta_x > 0 else -1
-        inc_y = 1 if delta_y > 0 else -1
+        if delta_y < 0:
+            ax = bx
+            ay = by
+            inc_x = -inc_x
         abs_delta_x = abs(delta_x)
         abs_delta_y = abs(delta_y)
-        putPixel = self.putPixel
         err_limit = 0.5
-        y_major = abs_delta_y >= abs_delta_x
-        if y_major:
-            # Note: could be accelerated by writing contiguous vertical pixels
-            # in a single write.
+        width = self._width
+        page, bit = divmod(ay, 8)
+        offset = page * width + ax + 1
+        buf = self._buf
+        maskWord = self._maskWord
         err = 0
+        if abs_delta_y >= abs_delta_x:
             err_delta = float(abs_delta_x) / abs_delta_y
+            word = 0
+            offset_inc = 0
             for _ in xrange(abs_delta_y + 1):
-                putPixel(ax, ay, color)
+                word |= 1 << bit
+                bit += 1
+                if bit == 8:
+                    offset_inc = width
+                    bit = 0
                 err += err_delta
-                ay += inc_y
                 if err > err_limit:
-                    ax += inc_x
+                    offset_inc += inc_x
                     err -= 1
+                if offset_inc:
+                    maskWord(buf, offset, word, color)
+                    offset += offset_inc
+                    offset_inc = 0
+                    word = 0
+            if word:
+                maskWord(buf, offset, word, color)
         else:
             err_delta = float(abs_delta_y) / abs_delta_x
             for _ in xrange(abs_delta_x + 1):
-                putPixel(ax, ay, color)
+                maskWord(buf, offset, 1 << bit, color)
+                offset += inc_x
                 err += err_delta
-                ax += inc_x
                 if err > err_limit:
-                    ay += inc_y
+                    bit += 1
+                    if bit == 8:
+                        offset += width
+                        bit = 0
                     err -= 1
 
     def rect(self, ax, ay, bx, by, color, fill=False):
