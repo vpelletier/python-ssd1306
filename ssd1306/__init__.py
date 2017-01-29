@@ -236,6 +236,72 @@ class Framebuffer(object):
                 deltax -= 1
                 err -= 2 * deltax + 1
 
+    def blitRowImage(self, x, y, width, data, packed=False, big_endian=False):
+        """
+        x:
+            Left image border screen coordinate.
+        y:
+            Top image border screen coordinate.
+        width:
+            Image width, in pixels.
+        data:
+            Image data. First byte contains the leftmost 8 pixels of the
+            topmost row, then the 8 following pixel of the topmost row,
+            and so on until given width.
+        packed:
+            When False and image right border is not on a byte boundary,
+            discard remaining bits, next byte starts the next line.
+        big_endian:
+            When True image data MSbs are leftmost pixels.
+        """
+        putPixel = self.putPixel
+        bit_shift = range(8)
+        if big_endian:
+            bit_shift.reverse()
+        dx = dy = 0
+        for word in data:
+            for bit in bit_shift:
+                putPixel(x + dx, y + dy, (word >> bit) & 1)
+                dx += 1
+                if dx == width:
+                    dx = 0
+                    dy += 1
+                    if not packed:
+                        break
+
+    def blitColumnImage(self, x, y, height, data, packed=False, big_endian=False):
+        """
+        x:
+            Left image border screen coordinate.
+        y:
+            Top image border screen coordinate.
+        height:
+            Image height, in pixels.
+        data:
+            Image data. First byte contains the topmost 8 pixels of the
+            leftmost column, then the 8 following pixel of the leftmost column,
+            and so on until given height.
+        packed:
+            When False and image right border is not on a byte boundary,
+            discard remaining bits, next byte starts the next column.
+        big_endian:
+            When True image data MSbs are topmost pixels.
+        """
+        putPixel = self.putPixel
+        bit_shift = range(8)
+        if big_endian:
+            bit_shift.reverse()
+        dx = dy = 0
+        for word in data:
+            for bit in bit_shift:
+                putPixel(x + dx, y + dy, (word >> bit) & 1)
+                dy += 1
+                if dy == height:
+                    dy = 0
+                    dx += 1
+                    if not packed:
+                        break
+
 class SSD1306(object):
     width = 128
     height = 64
@@ -678,6 +744,35 @@ def test():
     fb.putPixel(127, 0, 1)
     fb.putPixel(0, 63, 1)
     fb.putPixel(127, 63, 1)
+
+    fb.blitRowImage(
+        5,
+        45,
+        26,
+        [
+            0b10001011, 0b11010000, 0b10000011, 0b00101010,
+            0b10001010, 0b00010000, 0b10000100, 0b10010101,
+            0b10001010, 0b00010000, 0b10001000, 0b01101010,
+            0b11111010, 0b00010000, 0b10001000, 0b01010101,
+            0b10001011, 0b10010000, 0b10001000, 0b01101010,
+            0b10001010, 0b00010000, 0b10001000, 0b01010101,
+            0b10001010, 0b00010000, 0b10000100, 0b10101010,
+            0b10001011, 0b11011110, 0b11110011, 0b00010101,
+        ],
+        big_endian=True,
+    )
+
+    fb.blitColumnImage(
+        33,
+        44,
+        10,
+        [
+            0b01110000, 0b10101010,
+            0b11111101, 0b11010101,
+            0b01110000, 0b10101010,
+        ],
+        big_endian=True,
+    )
 
     blit()
 
