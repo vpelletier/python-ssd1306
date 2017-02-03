@@ -17,120 +17,91 @@ ADDRESSING_MODE_PAGE        = 2
 CONTROL_TYPE_COMMAND = 0x80
 CONTROL_TYPE_DATA    = 0x40
 
+COLOR_OFF = 0
+COLOR_ON = 1
+COLOR_XOR = -1
+
 class Framebuffer(object):
     __slots__ = (
         '_buf',
         '_width',
         '_height',
+        '_pixel_height',
+        '_display',
+        '_start_line',
+        '_start_line_dirty',
     )
 
-    def __init__(self, width, height):
-        """
-        width: (int)
-            Framebuffer width in pixels.
-        height: (int)
-            Framebuffer heigth in pages.
-        """
-        self._buf = bytearray(width * height + 1)
-        self._buf[0] = CONTROL_TYPE_DATA
-        self._width = width
-        self._height = height
+    def __init__(self, display):
+        self._display = display
+        self._start_line = 0
+        self._start_line_dirty = True
+        self._width = width = display.width
+        self._height = height = display.page_count
+        self._pixel_height = height * 8
+        display.setAddressingMode(ADDRESSING_MODE_HORIZONTAL)
+        display.setColumnAddressRange(0, width - 1)
+        display.setPageAddressRange(0, height - 1)
+        self._buf = buf = bytearray(width * height + 1)
+        buf[0] = CONTROL_TYPE_DATA
 
-    def putPixel(self, x, y, color):
+    def blit(self):
+        display = self._display
+        display.blitRaw(self._buf)
+        if self._start_line_dirty:
+            display.setDisplayStartLine(self._start_line)
+            self._start_line_dirty = False
+
+    def putPixel(self, x, y, color=COLOR_ON):
         width = self._width
-        if x >= width:
-            return
-        page, bit = divmod(y, 8)
+        if not 0 <= x < width or not 0 <= y < self._pixel_height:
+            raise IndexError
+        page, bit = divmod(y + self._start_line, 8)
         self._maskWord(
             self._buf,
-            page * width + x + 1,
+            (page % self._height) * width + x + 1,
             1 << bit,
             color,
         )
 
     def getPixel(self, x, y):
         width = self._width
-        if not 0 <= x < width or y < 0:
+        if not 0 <= x < width or not 0 <= y < self._pixel_height:
             raise IndexError
-        page, bit = divmod(y, 8)
-        return (self._buf[page * width + x + 1] >> bit) & 1
-
-    def putWord(self, x, page, word):
-        width = self._width
-        if x >= width:
-            return
-        offset = page * width + x + 1
-        buf = self._buf
-        if 0 < offset < len(buf):
-            buf[offset] = word
-
-    def getWord(self, x, page):
-        width = self._width
-        if not 0 <= x < width or y < 0:
-            raise IndexError
-        return self._buf[page * width + x + 1]
+        page, bit = divmod(y + self._start_line, 8)
+        return (self._buf[(page % self._height)  * width + x + 1] >> bit) & 1
 
     @staticmethod
     def _maskWord(buf, offset, word, color):
-        if 0 < offset:
-            try:
-                if color == 1:
-                    buf[offset] |= word
-                elif color == -1:
-                    buf[offset] ^= word
-                else:
-                    buf[offset] &= word ^ 0xff
-            except IndexError:
-                pass
+        assert 0 < offset
+        if color == COLOR_ON:
+            buf[offset] |= word
+        elif color == COLOR_XOR:
+            buf[offset] ^= word
+        elif color == COLOR_OFF:
+            buf[offset] &= word ^ 0xff
+        else:
+            raise ValueError
 
-    def getBlitter(self, display, xmin=0, pagemin=0, lonely=False):
-        """
-        Return a callable which can blit this framebuffer's content to given
-        on-screen coordinates.
-        Changes made to the framebuffer after this method has returned
-        continue affeting the blitter at no cost.
-        Sets the display in horizontal addressing mode, and expects it to stay
-        that way.
-
-        display: (SSD1306)
-            The display to which blitting will happen.
-        xmin: (int)
-            Left screen coordinate.
-        pagemin: (int)
-            Top screen coordinate.
-        lonely: (bool)
-            Set to True if this is the only blitter affecting given display,
-            to save a tiny bit of speed (avoid reconfiguring display cissors
-            on each blit).
-        """
-        width = self._width
-        height = self._height
-        assert 0 <= xmin <= display.width - width
-        assert 0 <= pagemin <= display.height - height
-        display.setAddressingMode(ADDRESSING_MODE_HORIZONTAL)
-        xmax = xmin + width - 1
-        pagemax = pagemin + height - 1
-        if lonely:
-            display.setColumnAddressRange(xmin, xmax)
-            display.setPageAddressRange(pagemin, pagemax)
-            return functools.partial(display.blitRaw, self._buf)
-        return functools.partial(self.__blitRaw, display, xmin, pagemin, xmax, pagemax, self._buf)
-
-    @staticmethod
-    def __blitRaw(display, xmin, pagemin, xmax, pagemax, buf):
-        display.setColumnAddressRange(xmin, xmax)
-        display.setPageAddressRange(pagemin, pagemax)
-        display.blitRaw(buf)
-
-    def blank(self, color):
-        assert color in (0, 1)
+    def blank(self, color=COLOR_OFF):
+        if color not in (COLOR_OFF, COLOR_ON):
+            raise ValueError
         if color:
             color = 0xff
         buf = self._buf
         for index in xrange(self._width * self._height):
             buf[index + 1] = color
 
-    def line(self, ax, ay, bx, by, color):
+    def line(self, ax, ay, bx, by, color=COLOR_ON):
+        width = self._width
+        pixel_height = self._pixel_height
+        if (
+            not 0 <= ax < width or
+            not 0 <= ay < pixel_height or
+            not 0 <= bx < width or
+            not 0 <= by < pixel_height
+        ):
+            raise IndexError
         delta_x = bx - ax
         delta_y = by - ay
         if delta_x == delta_y == 0:
@@ -143,10 +114,10 @@ class Framebuffer(object):
             inc_x = -inc_x
         abs_delta_x = abs(delta_x)
         abs_delta_y = abs(delta_y)
-        err_limit = 0.5
-        width = self._width
-        page, bit = divmod(ay, 8)
-        offset = page * width + ax + 1
+        page, bit = divmod(ay + self._start_line, 8)
+        offset = (page % self._height) * width + ax + 1
+        buf_len = len(self._buf)
+        buf_inc = buf_len - 1
         buf = self._buf
         maskWord = self._maskWord
         err = 0
@@ -161,12 +132,14 @@ class Framebuffer(object):
                     offset_inc = width
                     bit = 0
                 err += err_delta
-                if err > err_limit:
+                if err > 0.5:
                     offset_inc += inc_x
                     err -= 1
                 if offset_inc:
                     maskWord(buf, offset, word, color)
                     offset += offset_inc
+                    if offset >= buf_len:
+                        offset -= buf_inc
                     offset_inc = 0
                     word = 0
             if word:
@@ -177,14 +150,16 @@ class Framebuffer(object):
                 maskWord(buf, offset, 1 << bit, color)
                 offset += inc_x
                 err += err_delta
-                if err > err_limit:
+                if err > 0.5:
                     bit += 1
                     if bit == 8:
                         offset += width
+                        if offset >= buf_len:
+                            offset -= buf_inc
                         bit = 0
                     err -= 1
 
-    def rect(self, ax, ay, bx, by, color, fill=False):
+    def rect(self, ax, ay, bx, by, color=COLOR_ON, fill=False):
         line = self.line
         if fill:
             delta_x = bx - ax
@@ -208,7 +183,7 @@ class Framebuffer(object):
             line(bx, by, ax + 1, by, color)
             line(ax, by, ax, ay + 1, color)
 
-    def circle(self, x, y, r, color, fill=False):
+    def circle(self, x, y, r, color=COLOR_ON, fill=False):
         deltax = r
         deltay = 0
         err = 0
@@ -301,6 +276,31 @@ class Framebuffer(object):
                     dx += 1
                     if not packed:
                         break
+
+    def scroll(self, line_count, color=COLOR_OFF):
+        """
+        Move screen content up by line_count lines (or down if negative).
+        color:
+            The color to paint the new lines in.
+        """
+        if line_count == 0:
+            return
+        pixel_height = self._pixel_height
+        if abs(line_count) >= pixel_height:
+            bottom = 0
+            self.blank(color)
+        else:
+            bottom = self._start_line + line_count
+            if color != -1:
+                if line_count < 0:
+                    ymin = pixel_height + line_count
+                    ymax = pixel_height - 1
+                else:
+                    ymin = 0
+                    ymax = line_count - 1
+                self.rect(0, ymin, self._width - 1, ymax, color, True)
+        self._start_line_dirty = True
+        self._start_line = bottom % pixel_height
 
 class SSD1306(object):
     width = 128
@@ -610,131 +610,80 @@ class SSD1306(object):
         self.power(True) # XXX: not reset default
 
     def getFramebuffer(self):
-        return Framebuffer(self.width, self.page_count)
+        return Framebuffer(self)
 
 def test():
     dev = SSD1306(1, 1)
     dev.reset()
     dev.initialise(False, False)
     dev.setAddressingMode(ADDRESSING_MODE_HORIZONTAL)
-    #dev.blit([x & 0xff for x in xrange(128 * 8)])
 
     # Dry-testing the low-level Framebuffer API
     fb = dev.getFramebuffer()
-    orig_buf = bytearray(fb._buf)
-    # Must not raise, while doing nothing
-    fb.putPixel(128, 0, 1)
-    assert fb._buf == orig_buf
-    fb.putPixel(0, 64, 1)
-    assert fb._buf == orig_buf
-    fb.putPixel(-1, 0, 1)
-    assert fb._buf == orig_buf
-    fb.putPixel(-2, 0, 1)
-    assert fb._buf == orig_buf
-    fb.putWord(-1, 0, 0xff)
-    assert fb._buf == orig_buf
-    fb.putWord(-2, 0, 0xff)
-    assert fb._buf == orig_buf
-    try:
-        fb.getPixel(128, 0)
-    except IndexError:
-        pass
-    else:
-        raise AssertionError('Should have raised IndexError')
-    try:
-        fb.getPixel(0, 64)
-    except IndexError:
-        pass
-    else:
-        raise AssertionError('Should have raised IndexError')
-    try:
-        fb.getPixel(-1, 0)
-    except IndexError:
-        pass
-    else:
-        raise AssertionError('Should have raised IndexError')
-    try:
-        fb.getPixel(-2, 0)
-    except IndexError:
-        pass
-    else:
-        raise AssertionError('Should have raised IndexError')
-    try:
-        fb.getWord(-1, 0)
-    except IndexError:
-        pass
-    else:
-        raise AssertionError('Should have raised IndexError')
-    try:
-        fb.getWord(-2, 0)
-    except IndexError:
-        pass
-    else:
-        raise AssertionError('Should have raised IndexError')
 
     # Some actual drawing
-    blit = fb.getBlitter(dev, lonely=True)
+    blit = fb.blit
 
-    fb.putPixel(0, 4, 1)
-    fb.putPixel(9, 4, 1)
-    fb.putPixel(0, 14, 1)
-    fb.putPixel(9, 14, 1)
+    fb.putPixel(0, 4)
+    fb.putPixel(9, 4)
+    fb.putPixel(0, 14)
+    fb.putPixel(9, 14)
 
     x = 20
     y = 4
-    fb.rect(x, y, x + 9, y + 9, 1)
-    fb.putPixel(x, y - 2, 1)
-    fb.putPixel(x - 2, y, 1)
-    fb.putPixel(x + 9 + 2, y + 9, 1)
-    fb.putPixel(x + 9, y + 9 + 2, 1)
+    fb.rect(x, y, x + 9, y + 9)
+    fb.putPixel(x, y - 2)
+    fb.putPixel(x - 2, y)
+    fb.putPixel(x + 9 + 2, y + 9)
+    fb.putPixel(x + 9, y + 9 + 2)
 
     x = 40
     y = 4
-    fb.rect(x, y, x + 9, y + 9, 1, True)
-    fb.putPixel(x, y - 2, 1)
-    fb.putPixel(x - 2, y, 1)
-    fb.putPixel(x + 9 + 2, y + 9, 1)
-    fb.putPixel(x + 9, y + 9 + 2, 1)
+    fb.rect(x, y, x + 9, y + 9, fill=True)
+    fb.putPixel(x, y - 2)
+    fb.putPixel(x - 2, y)
+    fb.putPixel(x + 9 + 2, y + 9)
+    fb.putPixel(x + 9, y + 9 + 2)
 
-    fb.circle(20, 30, 10, 1)
-    fb.putPixel(20, 30, 1)
-    fb.putPixel(10, 20, 1)
-    fb.putPixel(12, 20, 1)
-    fb.putPixel(14, 20, 1)
-    fb.putPixel(10, 22, 1)
-    fb.putPixel(10, 24, 1)
-    fb.putPixel(30, 40, 1)
-    fb.putPixel(28, 40, 1)
-    fb.putPixel(26, 40, 1)
-    fb.putPixel(30, 38, 1)
-    fb.putPixel(30, 36, 1)
+    fb.circle(20, 30, 10)
+    fb.putPixel(20, 30)
+    fb.putPixel(10, 20)
+    fb.putPixel(12, 20)
+    fb.putPixel(14, 20)
+    fb.putPixel(10, 22)
+    fb.putPixel(10, 24)
+    fb.putPixel(30, 40)
+    fb.putPixel(28, 40)
+    fb.putPixel(26, 40)
+    fb.putPixel(30, 38)
+    fb.putPixel(30, 36)
 
-    fb.circle(50, 30, 10, 1, True)
-    fb.putPixel(50, 30, 0)
-    fb.putPixel(40, 20, 1)
-    fb.putPixel(42, 20, 1)
-    fb.putPixel(44, 20, 1)
-    fb.putPixel(40, 22, 1)
-    fb.putPixel(40, 24, 1)
-    fb.putPixel(60, 40, 1)
-    fb.putPixel(58, 40, 1)
-    fb.putPixel(56, 40, 1)
-    fb.putPixel(60, 38, 1)
-    fb.putPixel(60, 36, 1)
+    fb.circle(50, 30, 10, fill=True)
+    fb.putPixel(50, 30, COLOR_OFF)
+    fb.putPixel(40, 20)
+    fb.putPixel(42, 20)
+    fb.putPixel(44, 20)
+    fb.putPixel(40, 22)
+    fb.putPixel(40, 24)
+    fb.putPixel(60, 40)
+    fb.putPixel(58, 40)
+    fb.putPixel(56, 40)
+    fb.putPixel(60, 38)
+    fb.putPixel(60, 36)
 
     cx = 100
     cy = 30
     for offset in xrange(0, 42, 4):
-        fb.line(cx, cy, cx - 20 + offset, cy + 20, 1)
-        fb.line(cx, cy, cx - 20 + offset, cy - 20, 1)
-        fb.line(cx, cy, cx + 20, cy - 20 + offset, 1)
-        fb.line(cx, cy, cx - 20, cy - 20 + offset, 1)
-    fb.rect(cx - 21, cy - 21, cx + 21, cy + 21, -1)
+        fb.line(cx, cy, cx - 20 + offset, cy + 20)
+        fb.line(cx, cy, cx - 20 + offset, cy - 20)
+        fb.line(cx, cy, cx + 20, cy - 20 + offset)
+        fb.line(cx, cy, cx - 20, cy - 20 + offset)
+    fb.rect(cx - 21, cy - 21, cx + 21, cy + 21, COLOR_XOR)
 
-    fb.putPixel(0, 0, 1)
-    fb.putPixel(127, 0, 1)
-    fb.putPixel(0, 63, 1)
-    fb.putPixel(127, 63, 1)
+    fb.putPixel(0, 0)
+    fb.putPixel(127, 0)
+    fb.putPixel(0, 63)
+    fb.putPixel(127, 63)
 
     fb.blitRowImage(
         5,
@@ -767,52 +716,129 @@ def test():
 
     blit()
 
+    def testCard(fb):
+        fb.blank()
+        fb.rect(0, 0, 127, 63)
+        for row in xrange(0, 33, 16):
+            fb.line(0, row, 127, row)
+            fb.line(0, 63 - row, 127, 63 - row)
+        for column in xrange(0, 65, 16):
+            fb.line(column, 0, column, 63)
+            fb.line(127 - column, 0, 127 - column, 63)
+        for radius, color, fill in (
+            (30, 0, True),
+            (27, 1, True),
+            (30, 1, False),
+        ):
+            for x, y in (
+                (63, 31),
+                (63, 32),
+                (64, 32),
+                (64, 31),
+            ):
+                fb.circle(x, y, radius, color, fill)
+        fb.line(2, 2, 12, 12)
+        fb.line(125, 2, 115, 12)
+        fb.line(2, 61, 12, 51)
+        fb.line(125, 61, 115, 51)
+        fb.line(0, 0, 127, 63, COLOR_XOR)
+        fb.line(127, 0, 0, 63, COLOR_XOR)
+        fb.blitRowImage(
+            2, 18,
+            13,
+            [
+                0b11111111, 0b11111000,
+                0b10000000, 0b00010000,
+                0b10000000, 0b00000000,
+                0b10000000, 0b00101000,
+                0b10000000, 0b00010000,
+                0b10000000, 0b00101000,
+                0b10000000, 0b00000000,
+                0b10000000, 0b00000000,
+                0b10000000, 0b00000000,
+                0b10010100, 0b00000000,
+                0b11001000, 0b00000000,
+                0b10001000, 0b00000000,
+            ],
+            big_endian=True,
+        )
+
+    testCard(fb)
+    blit()
     import time
 
+    # Scrolling
     BEGIN = time.time()
-    fb.blank(1)
+    for _ in xrange(32):
+        fb.scroll(1)
+        blit()
+    duration = time.time() - BEGIN
+    print 'Scroll up: %.4fs (%i fps)' % (duration, 32 / duration)
+
+    testCard(fb)
+    blit()
+    for _ in xrange(52):
+        fb.scroll(1)
+        blit()
+
+    BEGIN = time.time()
+    for _ in xrange(10):
+        fb.scroll(-2)
+        blit()
+    duration = time.time() - BEGIN
+    print 'Scroll down: %.4fs (%i fps)' % (duration, 10 / duration)
+
+    # Rectangle fill
+    BEGIN = time.time()
+    fb.blank(COLOR_ON)
     for n in xrange(2, 32, 2):
-        fb.rect(n, n, 127 - n, 63 - n, -1, True)
+        fb.rect(n, n, 127 - n, 63 - n, COLOR_XOR, True)
         blit()
     duration = time.time() - BEGIN
     print 'Alternating rects: %.4fs (%i fps)' % (duration, 15 / duration)
 
     BEGIN = time.time()
-    fb.blank(1)
+    fb.blank(COLOR_ON)
     for n in xrange(2, 32, 2):
-        fb.rect(n, n, 127 - n, 63 - n, -1, True)
+        fb.rect(n, n, 127 - n, 63 - n, COLOR_XOR, True)
     blit()
     duration = time.time() - BEGIN
     print 'Alternating rects single blit: %.4fs (%i fps)' % (duration, 15 / duration)
 
     BEGIN = time.time()
-    fb.blank(0)
+    for n in xrange(64):
+        blit()
+    duration = time.time() - BEGIN
+    print 'Blit loop: %.4fs (%i fps)' % (duration, 64 / duration)
+
+    BEGIN = time.time()
+    fb.blank()
     for x in xrange(64):
-        fb.line(x, 0, x, x, 1)
+        fb.line(x, 0, x, x)
         blit()
     duration = time.time() - BEGIN
     print 'Vertical lines: %.4fs (%i fps)' % (duration, 64 / duration)
 
     BEGIN = time.time()
-    fb.blank(0)
+    fb.blank()
     for x in xrange(64):
-        fb.line(x, 0, x, x, 1)
+        fb.line(x, 0, x, x)
     blit()
     duration = time.time() - BEGIN
     print 'Vertical lines single blit: %.4fs (%i fps)' % (duration, 64 / duration)
 
     BEGIN = time.time()
-    fb.blank(0)
+    fb.blank()
     for y in xrange(64):
-        fb.line(0, y, y, y, 1)
+        fb.line(0, y, y, y)
         blit()
     duration = time.time() - BEGIN
     print 'Horizontal lines: %.4fs (%i fps)' % (duration, 64 / duration)
 
     BEGIN = time.time()
-    fb.blank(0)
+    fb.blank()
     for y in xrange(64):
-        fb.line(0, y, y, y, 1)
+        fb.line(0, y, y, y)
     blit()
     duration = time.time() - BEGIN
     print 'Horizontal lines single blit: %.4fs (%i fps)' % (duration, 64 / duration)
