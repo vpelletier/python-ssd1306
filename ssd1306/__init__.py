@@ -61,6 +61,14 @@ class Framebuffer(object):
         self._buf = buf = bytearray(width * height + 1)
         buf[0] = CONTROL_TYPE_DATA
 
+    @property
+    def width(self):
+        return self._width
+
+    @property
+    def height(self):
+        return self._pixel_height
+
     def blit(self):
         display = self._display
         display.blitRaw(self._buf)
