@@ -227,7 +227,7 @@ class Framebuffer(object):
                 deltax -= 1
                 err -= 2 * deltax + 1
 
-    def blitRowImage(self, x, y, width, data, packed=False, big_endian=False):
+    def blitRowImage(self, x, y, width, data, color=COLOR_ON, packed=False, big_endian=False):
         """
         x:
             Left image border screen coordinate.
@@ -252,7 +252,8 @@ class Framebuffer(object):
         dx = dy = 0
         for word in data:
             for bit in bit_shift:
-                putPixel(x + dx, y + dy, (word >> bit) & 1)
+                if (word >> bit) & 1:
+                    putPixel(x + dx, y + dy, color)
                 dx += 1
                 if dx == width:
                     dx = 0
@@ -260,7 +261,7 @@ class Framebuffer(object):
                     if not packed:
                         break
 
-    def blitColumnImage(self, x, y, height, data, packed=False, big_endian=False):
+    def blitColumnImage(self, x, y, height, data, color=COLOR_ON, packed=False, big_endian=False):
         """
         x:
             Left image border screen coordinate.
@@ -285,7 +286,8 @@ class Framebuffer(object):
         dx = dy = 0
         for word in data:
             for bit in bit_shift:
-                putPixel(x + dx, y + dy, (word >> bit) & 1)
+                if (word >> bit) & 1:
+                    putPixel(x + dx, y + dy, color)
                 dy += 1
                 if dy == height:
                     dy = 0
