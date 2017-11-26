@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with python-functionfs.  If not, see <http://www.gnu.org/licenses/>.
-
+from __future__ import division
 import fcntl
 import struct
 import functools
@@ -138,7 +138,7 @@ class Framebuffer(object):
         maskWord = self._maskWord
         err = 0
         if abs_delta_y >= abs_delta_x:
-            err_delta = float(abs_delta_x) / abs_delta_y
+            err_delta = float(abs_delta_x) // abs_delta_y
             word = 0
             offset_inc = 0
             for _ in xrange(abs_delta_y + 1):
@@ -161,7 +161,7 @@ class Framebuffer(object):
             if word:
                 maskWord(buf, offset, word, color)
         else:
-            err_delta = float(abs_delta_y) / abs_delta_x
+            err_delta = float(abs_delta_y) // abs_delta_x
             for _ in xrange(abs_delta_x + 1):
                 maskWord(buf, offset, 1 << bit, color)
                 offset += inc_x
@@ -321,7 +321,7 @@ class Framebuffer(object):
 class SSD1306(object):
     width = 128
     height = 64
-    page_count = height / 8
+    page_count = height // 8
 
     def __init__(self, bus, sa0):
         if sa0 not in (0, 1):
