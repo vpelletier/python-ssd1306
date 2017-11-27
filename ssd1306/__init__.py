@@ -17,6 +17,10 @@ from __future__ import division
 import fcntl
 import struct
 import functools
+try:
+    import freetype
+except ImportError:
+    freetype = None
 
 # From linux/i2c-dev.h
 I2C_SLAVE = 0x0703          # Use this slave address
@@ -327,6 +331,112 @@ class Framebuffer(object):
                 self.rect(0, ymin, self._width - 1, ymax, color, True)
         self._start_line_dirty = True
         self._start_line = bottom % pixel_height
+
+    @staticmethod
+    def _repackAndScissor(bitmap, crop_top=0, crop_bottom=0):
+        # freetype bitmaps may contain all-empty bytes at end of line, which
+        # are not handled by blitting, so repack when needed.
+        # Also, height not being guaranteed, crop top & bottom to not escape
+        # intended rendering rect.
+        pitch = (7 + bitmap.width) // 8
+        if pitch == bitmap.pitch:
+            result = list(bitmap.buffer)
+        else:
+            result = []
+            x = 0
+            for data in bitmap.buffer:
+                if x < pitch:
+                    result.append(data)
+                x += 1
+                x %= bitmap.pitch
+        if crop_top:
+            result = result[crop_top * pitch:]
+        if crop_bottom:
+            result = result[:-crop_bottom * pitch]
+        return result
+
+    def printLineAt(self, face, x, y, text, width=None, height=12, color=COLOR_ON):
+        """
+        Render <text> as a single line, with top-left corner at (<x>, <y>) and
+        bottom-right corner at most at (<x> + <width>, <y> + <height>),
+        in <color> and using font <face> (a freetype.Face instance).
+        Returns the number of chars which could fit.
+        Stops printing when encountering a \\t (newline) char.
+        """
+        if width is None:
+            width = self._width - x
+        baseline = int(height * 4 / 5)
+        blitRowImage = self.blitRowImage
+        face.set_pixel_sizes(0, height - 2)
+        previous_char = None
+        rendered = 0
+        for char in text:
+            if char == u'\n':
+                rendered += 1
+                break
+            face.load_char(
+                char,
+                freetype.FT_LOAD_RENDER |
+                freetype.FT_LOAD_MONOCHROME |
+                freetype.FT_LOAD_TARGET_MONO,
+            )
+            glyph = face.glyph
+            bitmap = glyph.bitmap
+            char_width = max(
+                glyph.advance.x // 64,
+                glyph.bitmap_left + bitmap.width,
+            ) + face.get_kerning(previous_char, char).x // 64
+            width -= char_width
+            if width < 0:
+                if not rendered:
+                    raise ValueError('Too narrow for first char')
+                break
+            y_offset = baseline - glyph.bitmap_top
+            crop_top = -min(0, y_offset)
+            y_offset = max(0, y_offset)
+            blitRowImage(
+                x + glyph.bitmap_left,
+                y + y_offset,
+                bitmap.width,
+                self._repackAndScissor(
+                    bitmap,
+                    crop_top,
+                    max(0, (y_offset + bitmap.rows) - height),
+                ),
+                color=color,
+                big_endian=True,
+            )
+            x += char_width
+            previous_char = char
+            rendered += 1
+        return rendered
+
+    def printAt(self, face, x, y, text, width=None, height=None, line_height=12, color=COLOR_ON, scroll=False):
+        """
+        Render multi-line <text>, wrapping on \\n and when next char would not
+        fit, with top-left corner at (<x>, <y>) and bottom-right corner at most
+        at (<x> + <width>, <y> + <height>), in <color> and using font <face>
+        (a freetype.Face instance), each line having a height of <line_height>.
+        Returns the number of chars which could fit.
+        Stop printing before reaching screen bottom, unless <scroll> is true,
+        in which case it will scroll the screen up.
+        """
+        if height is None:
+            height = self._pixel_height - y
+        total_printed = 0
+        while text:
+            y_overflow = y + line_height - height
+            if y_overflow > 0:
+                if scroll:
+                    self.scroll(y_overflow, not color)
+                    y -= y_overflow
+                else:
+                    break
+            printed = self.printLineAt(face, x, y, text, width, line_height, color)
+            total_printed += printed
+            text = text[printed:]
+            y += line_height
+        return total_printed
 
 class SSD1306(object):
     width = 128
@@ -868,6 +978,39 @@ def test():
     blit()
     duration = time.time() - BEGIN
     print 'Horizontal lines single blit: %.4fs (%i fps)' % (duration, 64 / duration)
+
+    try:
+        face = freetype.Face('/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf')
+    except AttributeError:
+        print 'freetype module missing, skipping font demo'
+    except freetype.ft_errors.FT_Exception:
+        print 'Noto-Mono-Regular not found, skipping font demo'
+    else:
+        fb.blank()
+        BEGIN = time.time()
+        fb.printAt(face, 0, 0, u"Hello, world !")
+        duration = time.time() - BEGIN
+        print 'Print single line, no blit: %.4fs (%i fps, %i cps)' % (duration, 1 / duration, 14 / duration)
+        blit()
+        time.sleep(0.2)
+
+        fb.blank(COLOR_ON)
+        fb.printAt(face, 0, 0, u"Hello, world !", color=COLOR_OFF)
+        blit()
+        time.sleep(0.2)
+
+        fb.blank()
+        fb.printAt(face, 0, 0, u"The quick brown fox jumps over the lazy dog. " * 3, scroll=True)
+        blit()
+        time.sleep(0.2)
+
+        BEGIN = time.time()
+        for size in xrange(64, 4, -1):
+            fb.blank()
+            fb.printAt(face, 0, 0, u"Hello, world !\n1234567890\nabcdefghijklmnopqrstuvwxyz", line_height=size)
+            blit()
+        duration = time.time() - BEGIN
+        print 'Print: %.4fs (%i fps)' % (duration, (64 - 4) / duration)
 
     dev.power(False)
 
